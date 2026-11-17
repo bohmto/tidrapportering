@@ -3001,12 +3001,29 @@
 
       let grandTotalHours = 0;
       let grandTotalCost = 0;
+      let totalObHours = 0;
+      let totalObCost = 0;
+      let totalWeekendObHours = 0;
+      let totalWeekendObCost = 0;
 
       activeEntries.forEach(entry => {
         const cust = customers.find(c => c.id === entry.customerId);
         const calc = calculateEntryCost(entry, cust);
         grandTotalHours += calc.totalHours;
         grandTotalCost += calc.cost;
+
+        const splitRows = splitEntryForReport(entry, cust);
+        splitRows.forEach(sr => {
+          if (sr.obHours > 0) {
+            if (sr.project && sr.project.includes('Helg-OB')) {
+              totalWeekendObHours += sr.obHours;
+              totalWeekendObCost += sr.cost;
+            } else {
+              totalObHours += sr.obHours;
+              totalObCost += sr.cost;
+            }
+          }
+        });
       });
 
       activeEntries.forEach(entry => {
@@ -3060,6 +3077,10 @@
         <div style="display:flex; justify-content:space-between; font-size:15px; margin-top:6px;">
           <span>Total arbetstid: <strong>${Number(grandTotalHours.toFixed(2))} h</strong></span>
           <span>Totalsumma: <strong>${Math.round(grandTotalCost).toLocaleString('sv-SE')} kr</strong></span>
+        </div>
+        <div style="display:flex; justify-content:space-between; font-size:13px; margin-top:8px; color:#94a3b8; border-top:1px solid #334155; padding-top:6px;">
+          <span>Vardags-OB: <strong>${Number(totalObHours.toFixed(2))} h</strong> (${Math.round(totalObCost).toLocaleString('sv-SE')} kr)</span>
+          <span>Helg-OB: <strong>${Number(totalWeekendObHours.toFixed(2))} h</strong> (${Math.round(totalWeekendObCost).toLocaleString('sv-SE')} kr)</span>
         </div>
       `;
       listContainer.appendChild(summaryCard);
@@ -3364,6 +3385,23 @@
       totalRow.push("", Number(totalCostSum.toFixed(2)), "", "", "");
       tidSheetRows.push(totalRow);
 
+      let totalObHoursSum = 0;
+      let totalObCostSum = 0;
+      let totalWkndHoursSum = 0;
+      let totalWkndCostSum = 0;
+
+      allSplitRows.forEach(sr => {
+        if (sr.obHours > 0) {
+          if (sr.project && sr.project.includes('Helg-OB')) {
+            totalWkndHoursSum += sr.obHours;
+            totalWkndCostSum += sr.cost;
+          } else {
+            totalObHoursSum += sr.obHours;
+            totalObCostSum += sr.cost;
+          }
+        }
+      });
+
       const sammRows = [
         [`Tidrapport - Sammanfattning`],
         ["Användare:", clientName],
@@ -3371,6 +3409,8 @@
         [],
         ["Nyckeltal", "Värde"],
         ["Total arbetstid", `${Number(totalHoursSum.toFixed(2))} h`],
+        ["Vardags-OB", `${Number(totalObHoursSum.toFixed(2))} h (${Math.round(totalObCostSum)} kr)`],
+        ["Helg-OB", `${Number(totalWkndHoursSum.toFixed(2))} h (${Math.round(totalWkndCostSum)} kr)`],
         ["Total ersättning", `${Number(totalCostSum.toFixed(2))} kr`]
       ];
 
