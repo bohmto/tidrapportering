@@ -2546,10 +2546,15 @@
         shift.status = 'working';
         const breakEnd = Date.now();
         const breakDurationMs = breakEnd - shift.breakStart;
+        const breakDurationMins = breakDurationMs / (1000 * 60);
         shift.breakTimeMs += breakDurationMs;
 
-        shift.lastPeriodStart = Date.now();
-        alarmStateMap = {};
+        // Nollställ endast 6h-perioden om rasten var minst 30 minuter
+        const minResetBreakMins = 30;
+        if (breakDurationMins >= minResetBreakMins) {
+          shift.lastPeriodStart = Date.now();
+          alarmStateMap = {};
+        }
 
         if (!shift.breaks) shift.breaks = [];
         shift.breaks.push({
