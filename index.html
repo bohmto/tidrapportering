@@ -926,8 +926,22 @@
         </div>
 
         <div id="weekend-fields-container">
+          <div class="form-row" style="margin-bottom: 10px;">
+            <div class="form-group" style="margin-bottom: 0;">
+              <label for="field-ob-weekend-friday-start" style="font-size: 13px;">Start fredag / dag före helgdag</label>
+              <input type="time" id="field-ob-weekend-friday-start" value="21:00">
+            </div>
+            <div class="form-group" style="margin-bottom: 0;">
+              <label for="field-ob-weekend-sunday-end" style="font-size: 13px;">Slut natt mot måndag / vardag</label>
+              <input type="time" id="field-ob-weekend-sunday-end" value="00:00">
+            </div>
+          </div>
+          <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 10px;">
+            Start: vanligtvis 21:00 (00:00 = lördag midnatt). Slut: 00:00 = söndag midnatt (t.ex. 06:00 om helg-OB gäller till måndag morgon).
+          </div>
+
           <div class="form-group" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-            <label for="field-ob-weekend-allday" style="margin: 0; font-size: 13px;">Gäller hela dygnet på helgen</label>
+            <label for="field-ob-weekend-allday" style="margin: 0; font-size: 13px;">Gäller hela dygnet lördag–söndag / helgdag</label>
             <input type="checkbox" id="field-ob-weekend-allday" style="width: auto;" checked onchange="toggleWeekendTimes()">
           </div>
 
@@ -1084,6 +1098,8 @@
         ob_rate_value: 1.5,
         ob_weekend_enabled: true,
         ob_weekend_allday: true,
+        ob_weekend_friday_start: '21:00',
+        ob_weekend_sunday_end: '24:00',
         ob_weekend_start_time: '00:00',
         ob_weekend_end_time: '23:59',
         ob_weekend_rate_type: 'multiplier',
@@ -3114,11 +3130,146 @@
       return filtered;
     }
 
+    // Valbara extra datum (t.ex. klämdagar) i formatet "ÅÅÅÅ-MM-DD"
+    const EXTRA_HOLIDAY_DATES = new Set([
+      // Exempel: "2027-05-07"
+    ]);
+
+    function formatLocalDateStr(dateObj) {
+      const y = dateObj.getFullYear();
+      const m = String(dateObj.getMonth() + 1).padStart(2, '0');
+      const d = String(dateObj.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+
+    function addDaysToDateStr(dateStr, days) {
+      const [y, m, d] = dateStr.split('-').map(Number);
+      const dt = new Date(y, m - 1, d + days);
+      return formatLocalDateStr(dt);
+    }
+
+    function getEasterSunday(year) {
+      const a = year % 19;
+      const b = Math.floor(year / 100);
+      const c = year % 100;
+      const d = Math.floor(b / 4);
+      const e = b % 4;
+      const f = Math.floor((b + 8) / 25);
+      const g = Math.floor((b - f + 1) / 3);
+      const h = (19 * a + b - d - g + 15) % 30;
+      const i = Math.floor(c / 4);
+      const k = c % 4;
+      const l = (32 + 2 * e + 2 * i - h - k) % 7;
+      const m = Math.floor((a + 11 * h + 22 * l) / 451);
+      const month = Math.floor((h + l - 7 * m + 114) / 31);
+      const day = ((h + l - 7 * m + 114) % 31) + 1;
+      return new Date(year, month - 1, day);
+    }
+
+    function getTransportAgreementHolidaysForYear(year) {
+      const days = new Set([
+        `${year}-01-01`, // Nyårsdagen
+        `${year}-01-06`, // Trettondedag jul
+        `${year}-05-01`, // Första maj
+        `${year}-06-06`, // Nationaldagen
+        `${year}-12-24`, // Julafton
+        `${year}-12-25`, // Juldagen
+        `${year}-12-26`, // Annandag jul
+        `${year}-12-31`  // Nyårsafton
+      ]);
+
+      const easter = getEasterSunday(year);
+      const addEasterOffset = (offsetDays) => {
+        const dt = new Date(easter.getFullYear(), easter.getMonth(), easter.getDate() + offsetDays);
+        days.add(formatLocalDateStr(dt));
+      };
+
+      addEasterOffset(-2); // Långfredag
+      addEasterOffset(-1); // Påskafton
+      addEasterOffset(1);  // Annandag påsk
+      addEasterOffset(39); // Kristi himmelsfärdsdag
+      addEasterOffset(49); // Pingstafton
+      addEasterOffset(50); // Annandag pingst
+
+      for (let day = 19; day <= 25; day++) {
+        const dt = new Date(year, 5, day);
+        if (dt.getDay() === 6) {
+          days.add(formatLocalDateStr(dt)); // Midsommardagen
+          const eve = new Date(year, 5, day - 1);
+          days.add(formatLocalDateStr(eve)); // Midsommarafton
+          break;
+        }
+      }
+
+      for (let offset = 0; offset <= 6; offset++) {
+        const dt = new Date(year, 9, 31 + offset);
+        if (dt.getDay() === 6) {
+          days.add(formatLocalDateStr(dt)); // Alla helgons dag
+          break;
+        }
+      }
+
+      return days;
+    }
+
+    function isHolidayOrKlamdag(dateStr) {
+      if (!dateStr) return false;
+      if (EXTRA_HOLIDAY_DATES.has(dateStr)) return true;
+      const year = parseInt(dateStr.slice(0, 4), 10);
+      if (isNaN(year)) return false;
+      return getTransportAgreementHolidaysForYear(year).has(dateStr);
+    }
+
     function isWeekend(dateStr) {
       if (!dateStr) return false;
-      const d = new Date(dateStr + 'T00:00:00');
-      const day = d.getDay();
+      if (isHolidayOrKlamdag(dateStr)) return true;
+      const [y, m, d] = dateStr.split('-').map(Number);
+      const dt = new Date(y, m - 1, d);
+      const day = dt.getDay();
       return day === 0 || day === 6;
+    }
+
+    function isWeekendObMinute(dateStr, minuteOfDay, customer) {
+      if (!dateStr) return false;
+      const fridayStartStr = (customer && customer.ob_weekend_friday_start) ? customer.ob_weekend_friday_start : '21:00';
+      const fridayStartMins = timeToMins(fridayStartStr);
+
+      const sundayEndStr = (customer && customer.ob_weekend_sunday_end) ? customer.ob_weekend_sunday_end : '24:00';
+      const sundayEndMins = (sundayEndStr === '24:00' || sundayEndStr === '00:00') ? 0 : timeToMins(sundayEndStr);
+
+      if (isHolidayOrKlamdag(dateStr)) return true;
+
+      const [y, m, d] = dateStr.split('-').map(Number);
+      const dt = new Date(y, m - 1, d);
+      const day = dt.getDay(); // 0 = Sön, 1 = Mån, 5 = Fre, 6 = Lör
+
+      if (day === 0 || day === 6) {
+        if (customer && customer.ob_weekend_allday === false) {
+          const wStart = timeToMins(customer.ob_weekend_start_time || '00:00');
+          const wEnd = timeToMins(customer.ob_weekend_end_time || '23:59');
+          return minuteOfDay >= wStart && minuteOfDay <= wEnd;
+        }
+        return true;
+      }
+
+      // Fredag (eller vardag före helgdag) fr.o.m. vald starttid (t.ex. 21:00)
+      if (day === 5 && fridayStartMins > 0 && minuteOfDay >= fridayStartMins) {
+        return true;
+      }
+      const nextDateStr = addDaysToDateStr(dateStr, 1);
+      if (isHolidayOrKlamdag(nextDateStr) && fridayStartMins > 0 && minuteOfDay >= fridayStartMins) {
+        return true;
+      }
+
+      // Måndag (eller vardag efter helgdag) fram till vald sluttid (t.ex. 06:00)
+      if (sundayEndMins > 0 && minuteOfDay < sundayEndMins) {
+        const prevDateStr = addDaysToDateStr(dateStr, -1);
+        if (day === 1 || isHolidayOrKlamdag(prevDateStr)) {
+          return true;
+        }
+      }
+
+      return false;
     }
 
     function timeToMins(tStr) {
@@ -3135,6 +3286,37 @@
       return Math.max(0, totalMins / 60);
     }
 
+    function getBreakMinuteSet(entry, startM, endM) {
+      const breakSet = new Set();
+      if (Array.isArray(entry.breaks) && entry.breaks.length > 0) {
+        let matchedAny = false;
+        entry.breaks.forEach(b => {
+          if (!b || !b.start || !b.end) return;
+          let bStart = timeToMins(b.start);
+          let bEnd = timeToMins(b.end);
+          if (bEnd < bStart) bEnd += 24 * 60;
+
+          while (bStart < startM - 720) {
+            bStart += 1440;
+            bEnd += 1440;
+          }
+          if (bEnd <= startM && bStart + 1440 < endM) {
+            bStart += 1440;
+            bEnd += 1440;
+          }
+
+          const clampedStart = Math.max(startM, bStart);
+          const clampedEnd = Math.min(endM, bEnd);
+          for (let m = clampedStart; m < clampedEnd; m++) {
+            breakSet.add(m);
+            matchedAny = true;
+          }
+        });
+        if (matchedAny) return breakSet;
+      }
+      return null;
+    }
+
     function splitEntryForReport(entry, customer) {
       const rows = [];
       const startTime = entry.startTime || "00:00";
@@ -3143,35 +3325,7 @@
       const custName = customer ? customer.name : "Ica Hem till Dig";
       const proj = entry.project || "";
       const desc = entry.desc || "";
-      const isWk = isWeekend(entry.date);
-      const breakMins = entry.breakMin || 0;
-
-      if (isWk && customer && customer.ob_enabled && customer.ob_weekend_enabled) {
-        let wkndRate = baseRate;
-        if (customer.ob_weekend_rate_type === 'multiplier') {
-          wkndRate = baseRate * (customer.ob_weekend_rate_value || 2.0);
-        } else {
-          wkndRate = baseRate + (customer.ob_weekend_rate_value || 0);
-        }
-
-        const totalHours = safeNum(entry.hours);
-        rows.push({
-          date: entry.date,
-          startTime: startTime,
-          endTime: endTime,
-          breakMin: breakMins,
-          normalHours: 0,
-          obHours: totalHours,
-          otHours: 0,
-          hours: Number(totalHours.toFixed(2)),
-          rate: wkndRate,
-          cost: Math.round(totalHours * wkndRate * 100) / 100,
-          project: (proj ? proj + " " : "") + "(Helg-OB)",
-          customerName: custName,
-          desc: (desc ? desc + " - " : "") + "Helg-OB"
-        });
-        return rows;
-      }
+      const totalBreakMins = parseInt(entry.breakMin, 10) || 0;
 
       const startM = timeToMins(startTime);
       let endM = timeToMins(endTime);
@@ -3181,9 +3335,9 @@
         const calc = calculateEntryCost(entry, customer);
         rows.push({
           date: entry.date,
-          startTime: startTime,
-          endTime: endTime,
-          breakMin: breakMins,
+          startTime,
+          endTime,
+          breakMin: totalBreakMins,
           normalHours: calc.totalHours,
           obHours: 0,
           otHours: 0,
@@ -3192,7 +3346,7 @@
           cost: calc.cost,
           project: proj,
           customerName: custName,
-          desc: desc
+          desc
         });
         return rows;
       }
@@ -3202,111 +3356,164 @@
       const obStartM = timeToMins(obStartStr);
       const obEndM = timeToMins(obEndStr);
 
-      const obRate = customer.ob_rate_type === 'multiplier' 
+      const weekdayObRate = customer.ob_rate_type === 'multiplier'
         ? baseRate * (customer.ob_rate_value || 1.5)
         : baseRate + (customer.ob_rate_value || 0);
 
-      let morningObMins = 0;
-      let normalMins = 0;
-      let eveningObMins = 0;
+      const weekendObEnabled = customer.ob_enabled && customer.ob_weekend_enabled;
+      const weekendObRate = weekendObEnabled
+        ? (customer.ob_weekend_rate_type === 'multiplier'
+          ? baseRate * (customer.ob_weekend_rate_value || 2.0)
+          : baseRate + (customer.ob_weekend_rate_value || 0))
+        : weekdayObRate;
+
+      const explicitBreakMinutes = getBreakMinuteSet(entry, startM, endM);
+      let unplacedBreakMins = explicitBreakMinutes ? 0 : totalBreakMins;
+
+      const buckets = new Map();
+
+      const addMinuteToBucket = (category, dateStr, minuteOfDay) => {
+        const key = `${category}|${dateStr}`;
+        if (!buckets.has(key)) {
+          buckets.set(key, {
+            category,
+            date: dateStr,
+            mins: 0,
+            breakMins: 0,
+            firstMin: minuteOfDay,
+            lastMin: minuteOfDay
+          });
+        }
+        const b = buckets.get(key);
+        b.mins += 1;
+        b.lastMin = minuteOfDay;
+      };
+
+      const addBreakMinuteToBucket = (category, dateStr, minuteOfDay) => {
+        const key = `${category}|${dateStr}`;
+        if (!buckets.has(key)) {
+          buckets.set(key, {
+            category,
+            date: dateStr,
+            mins: 0,
+            breakMins: 0,
+            firstMin: minuteOfDay,
+            lastMin: minuteOfDay
+          });
+        }
+        const b = buckets.get(key);
+        b.breakMins += 1;
+        b.lastMin = minuteOfDay;
+      };
 
       for (let m = startM; m < endM; m++) {
-        const dayMinute = m % 1440;
-        if (dayMinute < obEndM || dayMinute >= obStartM) {
-          if (dayMinute < obEndM) morningObMins++;
-          else eveningObMins++;
+        const dayOffset = Math.floor(m / 1440);
+        const minuteOfDay = m % 1440;
+        const currentDateStr = dayOffset === 0 ? entry.date : addDaysToDateStr(entry.date, dayOffset);
+
+        let category = 'normal';
+        if (weekendObEnabled && isWeekendObMinute(currentDateStr, minuteOfDay, customer)) {
+          category = 'weekend_ob';
+        } else if (customer.ob_enabled && (minuteOfDay < obEndM || minuteOfDay >= obStartM)) {
+          category = minuteOfDay < obEndM ? 'morning_ob' : 'evening_ob';
+        }
+
+        if (explicitBreakMinutes && explicitBreakMinutes.has(m)) {
+          addBreakMinuteToBucket(category, currentDateStr, minuteOfDay);
         } else {
-          normalMins++;
+          addMinuteToBucket(category, currentDateStr, minuteOfDay);
         }
       }
 
-      let remainingBreak = breakMins;
-      let breakOnNormal = Math.min(normalMins, remainingBreak);
-      normalMins -= breakOnNormal;
-      remainingBreak -= breakOnNormal;
-
-      let breakOnMorning = Math.min(morningObMins, remainingBreak);
-      morningObMins -= breakOnMorning;
-      remainingBreak -= breakOnMorning;
-
-      let breakOnEvening = Math.min(eveningObMins, remainingBreak);
-      eveningObMins -= breakOnEvening;
-
-      const morningH = morningObMins / 60;
-      const normalH = normalMins / 60;
-      const eveningH = eveningObMins / 60;
-
-      if (morningH > 0) {
-        rows.push({
-          date: entry.date,
-          startTime: startTime,
-          endTime: obEndStr,
-          breakMin: breakOnMorning,
-          normalHours: 0,
-          obHours: Number(morningH.toFixed(2)),
-          otHours: 0,
-          hours: Number(morningH.toFixed(2)),
-          rate: obRate,
-          cost: Math.round(morningH * obRate * 100) / 100,
-          project: (proj ? proj + " " : "") + "(Morgon-OB)",
-          customerName: custName,
-          desc: (desc ? desc + " - " : "") + `Morgon-OB (${startTime}–${obEndStr})`
-        });
+      if (unplacedBreakMins > 0) {
+        for (const b of buckets.values()) {
+          if (unplacedBreakMins <= 0) break;
+          const deduct = Math.min(b.mins, unplacedBreakMins);
+          b.mins -= deduct;
+          b.breakMins += deduct;
+          unplacedBreakMins -= deduct;
+        }
       }
 
-      if (normalH > 0) {
-        rows.push({
-          date: entry.date,
-          startTime: morningH > 0 ? obEndStr : startTime,
-          endTime: eveningH > 0 ? obStartStr : endTime,
-          breakMin: breakOnNormal,
-          normalHours: Number(normalH.toFixed(2)),
-          obHours: 0,
-          otHours: 0,
-          hours: Number(normalH.toFixed(2)),
-          rate: baseRate,
-          cost: Math.round(normalH * baseRate * 100) / 100,
-          project: proj,
-          customerName: custName,
-          desc: desc
-        });
-      }
+      const formatMinOfDay = (m) => {
+        const clamped = Math.max(0, Math.min(1440, m));
+        if (clamped === 1440) return '24:00';
+        const hh = String(Math.floor(clamped / 60)).padStart(2, '0');
+        const mm = String(clamped % 60).padStart(2, '0');
+        return `${hh}:${mm}`;
+      };
 
-      if (eveningH > 0) {
-        rows.push({
-          date: entry.date,
-          startTime: (morningH > 0 || normalH > 0) ? obStartStr : startTime,
-          endTime: endTime,
-          breakMin: breakOnEvening,
-          normalHours: 0,
-          obHours: Number(eveningH.toFixed(2)),
-          otHours: 0,
-          hours: Number(eveningH.toFixed(2)),
-          rate: obRate,
-          cost: Math.round(eveningH * obRate * 100) / 100,
-          project: (proj ? proj + " " : "") + "(Vardags-OB)",
-          customerName: custName,
-          desc: (desc ? desc + " - " : "") + `Kvälls-OB (${obStartStr}–${endTime})`
-        });
-      }
+      for (const b of buckets.values()) {
+        if (b.mins <= 0) continue;
+        const hoursVal = Number((b.mins / 60).toFixed(2));
+        const segStart = formatMinOfDay(b.firstMin);
+        const segEnd = formatMinOfDay(b.lastMin + 1);
 
-      if (rows.length === 0) {
-        const calc = calculateEntryCost(entry, customer);
-        rows.push({
-          date: entry.date,
-          startTime: startTime,
-          endTime: endTime,
-          breakMin: breakMins,
-          normalHours: calc.totalHours,
-          obHours: 0,
-          otHours: 0,
-          hours: calc.totalHours,
-          rate: baseRate,
-          cost: calc.cost,
-          project: proj,
-          customerName: custName,
-          desc: desc
-        });
+        if (b.category === 'weekend_ob') {
+          rows.push({
+            date: b.date,
+            startTime: segStart,
+            endTime: segEnd,
+            breakMin: b.breakMins,
+            normalHours: 0,
+            obHours: hoursVal,
+            otHours: 0,
+            hours: hoursVal,
+            rate: weekendObRate,
+            cost: Math.round(hoursVal * weekendObRate * 100) / 100,
+            project: (proj ? proj + " " : "") + "(Helg-OB)",
+            customerName: custName,
+            desc: (desc ? desc + " - " : "") + `Helg-OB (${b.date} ${segStart}–${segEnd})`
+          });
+        } else if (b.category === 'morning_ob') {
+          rows.push({
+            date: b.date,
+            startTime: segStart,
+            endTime: segEnd,
+            breakMin: b.breakMins,
+            normalHours: 0,
+            obHours: hoursVal,
+            otHours: 0,
+            hours: hoursVal,
+            rate: weekdayObRate,
+            cost: Math.round(hoursVal * weekdayObRate * 100) / 100,
+            project: (proj ? proj + " " : "") + "(Morgon-OB)",
+            customerName: custName,
+            desc: (desc ? desc + " - " : "") + `Morgon-OB (${b.date} ${segStart}–${segEnd})`
+          });
+        } else if (b.category === 'evening_ob') {
+          rows.push({
+            date: b.date,
+            startTime: segStart,
+            endTime: segEnd,
+            breakMin: b.breakMins,
+            normalHours: 0,
+            obHours: hoursVal,
+            otHours: 0,
+            hours: hoursVal,
+            rate: weekdayObRate,
+            cost: Math.round(hoursVal * weekdayObRate * 100) / 100,
+            project: (proj ? proj + " " : "") + "(Vardags-OB)",
+            customerName: custName,
+            desc: (desc ? desc + " - " : "") + `Kvälls-OB (${b.date} ${segStart}–${segEnd})`
+          });
+        } else {
+          rows.push({
+            date: b.date,
+            startTime: segStart,
+            endTime: segEnd,
+            breakMin: b.breakMins,
+            normalHours: hoursVal,
+            obHours: 0,
+            otHours: 0,
+            hours: hoursVal,
+            rate: baseRate,
+            cost: Math.round(hoursVal * baseRate * 100) / 100,
+            project: proj,
+            customerName: custName,
+            desc
+          });
+        }
       }
 
       return rows;
@@ -3588,6 +3795,9 @@
           document.getElementById('field-ob-value').value = cust.ob_rate_value || 1.5;
           
           document.getElementById('field-ob-weekend-enable').checked = cust.ob_weekend_enabled || false;
+          document.getElementById('field-ob-weekend-friday-start').value = cust.ob_weekend_friday_start || '21:00';
+          const savedSunEnd = cust.ob_weekend_sunday_end || '24:00';
+          document.getElementById('field-ob-weekend-sunday-end').value = (savedSunEnd === '24:00' || savedSunEnd === '23:59') ? '00:00' : savedSunEnd;
           document.getElementById('field-ob-weekend-allday').checked = cust.ob_weekend_allday !== false;
           document.getElementById('field-ob-weekend-start').value = cust.ob_weekend_start_time || '00:00';
           document.getElementById('field-ob-weekend-end').value = cust.ob_weekend_end_time || '23:59';
@@ -3673,6 +3883,11 @@
         ob_rate_type: document.getElementById('field-ob-type').value,
         ob_rate_value: parseFloat(document.getElementById('field-ob-value').value) || 1.0,
         ob_weekend_enabled: document.getElementById('field-ob-weekend-enable').checked,
+        ob_weekend_friday_start: document.getElementById('field-ob-weekend-friday-start').value || '21:00',
+        ob_weekend_sunday_end: (() => {
+          const v = document.getElementById('field-ob-weekend-sunday-end').value;
+          return (!v || v === '00:00') ? '24:00' : v;
+        })(),
         ob_weekend_allday: document.getElementById('field-ob-weekend-allday').checked,
         ob_weekend_start_time: document.getElementById('field-ob-weekend-start').value,
         ob_weekend_end_time: document.getElementById('field-ob-weekend-end').value,
