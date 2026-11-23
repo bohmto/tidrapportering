@@ -2916,20 +2916,159 @@
       alert('Tidssegment sparat!');
     });
 
+    function getOvertimeHourlyRate(baseRate, customer, isQualified = false) {
+      const type = customer.ot_rate_type || 'multiplier';
+      const val = isQualified
+        ? (parseFloat(customer.ot_qual_value) === 0 ? 0 : safeNum(customer.ot_qual_value, 2.0))
+        : (parseFloat(customer.ot_simple_value) === 0 ? 0 : safeNum(customer.ot_simple_value, 1.5));
+
+      if (type === 'addon') return baseRate + val;
+      if (type === 'fixed_rate') return val;
+      return baseRate * val;
+    }
+
     function calculateEntryCost(entry, customer) {
-      if (!customer || !entry) return { totalHours: 0, cost: 0, rate: 0, breakMin: 0 };
+      if (!customer || !entry) return { totalHours: 0, normalHours: 0, obHours: 0, weekdayObHours: 0, weekendObHours: 0, weekdayObCost: 0, weekendObCost: 0, cost: 0, rate: 0, breakMin: 0 };
 
       const breakMin = parseInt(entry.breakMin, 10) || 0;
       let totalHours = safeNum(entry.hours);
-      let rate = safeNum(customer.hourly_rate);
-      let cost = totalHours * rate;
+      const rate = safeNum(customer.hourly_rate);
 
+      if (customer.ob_enabled && entry.startTime && entry.endTime) {
+        const parts = splitEntryForReport(entry, customer);
+        let splitCost = 0;
+        let splitHours = 0;
+        let normalHours = 0;
+        let weekdayObHours = 0;
+        let weekendObHours = 0;
+        let weekdayObCost = 0;
+        let weekendObCost = 0;
+
+        parts.forEach(p => {
+          splitCost += safeNum(p.cost);
+          splitHours += safeNum(p.hours);
+          normalHours += safeNum(p.normalHours);
+          if (safeNum(p.obHours) > 0) {
+            if (p.project && p.project.includes('Helg-OB')) {
+              weekendObHours += safeNum(p.obHours);
+              weekendObCost += safeNum(p.cost);
+            } else {
+              weekdayObHours += safeNum(p.obHours);
+              weekdayObCost += safeNum(p.cost);
+            }
+          }
+        });
+
+        if (splitHours > 0) {
+          return {
+            totalHours: Number(splitHours.toFixed(2)),
+            normalHours: Number(normalHours.toFixed(2)),
+            obHours: Number((weekdayObHours + weekendObHours).toFixed(2)),
+            weekdayObHours: Number(weekdayObHours.toFixed(2)),
+            weekendObHours: Number(weekendObHours.toFixed(2)),
+            weekdayObCost: Math.round(weekdayObCost * 100) / 100,
+            weekendObCost: Math.round(weekendObCost * 100) / 100,
+            rate,
+            cost: Math.round(splitCost * 100) / 100,
+            breakMin
+          };
+        }
+      }
+
+      const baseCost = Math.round(totalHours * rate * 100) / 100;
       return {
-        totalHours: safeNum(totalHours.toFixed(2)),
-        rate: rate,
-        cost: Math.round(safeNum(cost) * 100) / 100,
-        breakMin: breakMin
+        totalHours: Number(totalHours.toFixed(2)),
+        normalHours: Number(totalHours.toFixed(2)),
+        obHours: 0,
+        weekdayObHours: 0,
+        weekendObHours: 0,
+        weekdayObCost: 0,
+        weekendObCost: 0,
+        rate,
+        cost: baseCost,
+        breakMin
       };
+    }
+
+    function calculateMonthlyOvertimeMap(allEntries, customers) {
+      const otMap = new Map();
+      const groups = new Map();
+
+      allEntries.forEach(entry => {
+        if (!entry || !entry.date || !entry.customerId) return;
+        const ym = entry.date.slice(0, 7);
+        const key = `${entry.customerId}|${ym}`;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(entry);
+      });
+
+      groups.forEach((groupEntries, key) => {
+        const customerId = key.split('|')[0];
+        const customer = customers.find(c => c.id === customerId);
+        if (!customer || !customer.ot_enabled) return;
+
+        const monthlyCap = parseFloat(customer.ot_monthly_cap) === 0 ? 0 : safeNum(customer.ot_monthly_cap, 160);
+        const baseRate = safeNum(customer.hourly_rate);
+
+        const sorted = [...groupEntries].sort((a, b) => {
+          const dA = `${a.date}T${a.startTime || '00:00'}`;
+          const dB = `${b.date}T${b.startTime || '00:00'}`;
+          return dA.localeCompare(dB);
+        });
+
+        let accumulatedHours = 0;
+
+        sorted.forEach(entry => {
+          const parts = splitEntryForReport(entry, customer);
+          let entryOtSimpleHours = 0;
+          let entryOtQualHours = 0;
+          let entryOtCost = 0;
+          let entryAdjustedTotalCost = 0;
+
+          parts.forEach(p => {
+            const segHours = safeNum(p.hours);
+            if (segHours <= 0) return;
+
+            const prevAcc = accumulatedHours;
+            accumulatedHours = Number((accumulatedHours + segHours).toFixed(4));
+
+            if (accumulatedHours <= monthlyCap) {
+              entryAdjustedTotalCost += safeNum(p.cost);
+            } else {
+              const withinCapHours = Math.max(0, Number((monthlyCap - prevAcc).toFixed(4)));
+              const overCapHours = Number((segHours - withinCapHours).toFixed(4));
+
+              const isQual = isWeekend(p.date || entry.date) || (p.project && p.project.includes('Helg-OB'));
+              const otRate = getOvertimeHourlyRate(baseRate, customer, isQual);
+
+              const keptPartCost = withinCapHours * safeNum(p.rate);
+              const otPartCost = overCapHours * otRate;
+
+              if (isQual) {
+                entryOtQualHours += overCapHours;
+              } else {
+                entryOtSimpleHours += overCapHours;
+              }
+
+              entryOtCost += otPartCost;
+              entryAdjustedTotalCost += (keptPartCost + otPartCost);
+            }
+          });
+
+          const totalOtHours = Number((entryOtSimpleHours + entryOtQualHours).toFixed(2));
+          if (totalOtHours > 0) {
+            otMap.set(entry.id, {
+              otHours: totalOtHours,
+              otSimpleHours: Number(entryOtSimpleHours.toFixed(2)),
+              otQualHours: Number(entryOtQualHours.toFixed(2)),
+              otCost: Math.round(entryOtCost * 100) / 100,
+              adjustedTotalCost: Math.round(entryAdjustedTotalCost * 100) / 100
+            });
+          }
+        });
+      });
+
+      return otMap;
     }
 
     function editEntry(id) {
@@ -3020,37 +3159,43 @@
         return;
       }
 
+      const overtimeMap = calculateMonthlyOvertimeMap(entries, customers);
+
       let grandTotalHours = 0;
       let grandTotalCost = 0;
       let totalObHours = 0;
       let totalObCost = 0;
       let totalWeekendObHours = 0;
       let totalWeekendObCost = 0;
+      let totalOtHours = 0;
+      let totalOtCost = 0;
 
       activeEntries.forEach(entry => {
         const cust = customers.find(c => c.id === entry.customerId);
         const calc = calculateEntryCost(entry, cust);
-        grandTotalHours += calc.totalHours;
-        grandTotalCost += calc.cost;
+        const otInfo = overtimeMap.get(entry.id);
 
-        const splitRows = splitEntryForReport(entry, cust);
-        splitRows.forEach(sr => {
-          if (sr.obHours > 0) {
-            if (sr.project && sr.project.includes('Helg-OB')) {
-              totalWeekendObHours += sr.obHours;
-              totalWeekendObCost += sr.cost;
-            } else {
-              totalObHours += sr.obHours;
-              totalObCost += sr.cost;
-            }
-          }
-        });
+        const entryFinalCost = otInfo ? otInfo.adjustedTotalCost : calc.cost;
+        grandTotalHours += calc.totalHours;
+        grandTotalCost += entryFinalCost;
+
+        totalObHours += calc.weekdayObHours;
+        totalObCost += calc.weekdayObCost;
+        totalWeekendObHours += calc.weekendObHours;
+        totalWeekendObCost += calc.weekendObCost;
+
+        if (otInfo) {
+          totalOtHours += otInfo.otHours;
+          totalOtCost += otInfo.otCost;
+        }
       });
 
       activeEntries.forEach(entry => {
         const cust = customers.find(c => c.id === entry.customerId);
         const calc = calculateEntryCost(entry, cust);
-        
+        const otInfo = overtimeMap.get(entry.id);
+        const displayCost = otInfo ? otInfo.adjustedTotalCost : calc.cost;
+
         let breaksText = '';
         if (entry.breaks && entry.breaks.length > 0) {
           const bStrs = entry.breaks.map(b => `${b.start || '??'}–${b.end || '??'}`).join(', ');
@@ -3058,6 +3203,20 @@
         } else if (calc.breakMin > 0) {
           breaksText = `<div style="font-size:12px; color:var(--text-muted); margin-top:4px;">☕ Rast: ${calc.breakMin} min</div>`;
         }
+
+        let extrasBadges = [];
+        if (calc.weekdayObHours > 0) {
+          extrasBadges.push(`🌙 Vardags-OB: ${calc.weekdayObHours} h`);
+        }
+        if (calc.weekendObHours > 0) {
+          extrasBadges.push(`🎈 Helg-OB: ${calc.weekendObHours} h`);
+        }
+        if (otInfo && otInfo.otHours > 0) {
+          extrasBadges.push(`🚛 Övertid: ${otInfo.otHours} h (${otInfo.otCost.toLocaleString('sv-SE')} kr)`);
+        }
+        const extrasHtml = extrasBadges.length > 0
+          ? `<div style="font-size:12px; color:var(--primary); font-weight:600; margin-top:4px;">${extrasBadges.join(' • ')}</div>`
+          : '';
 
         const card = document.createElement('div');
         card.className = 'card';
@@ -3074,9 +3233,10 @@
           </div>
           <div style="margin-top:10px; font-size:14px;">
             <span>⏱️ Tid: <strong>${calc.totalHours} h</strong></span> | 
-            <span>💰 Taxa: <strong>${calc.rate} kr/h</strong></span> | 
-            <span>Ersättning: <strong>${calc.cost.toLocaleString('sv-SE')} kr</strong></span>
+            <span>💰 Grundtaxa: <strong>${calc.rate} kr/h</strong></span> | 
+            <span>Ersättning: <strong>${displayCost.toLocaleString('sv-SE')} kr</strong></span>
           </div>
+          ${extrasHtml}
           ${breaksText}
           ${entry.desc ? `<div style="font-size:13px; color:var(--text-muted); margin-top:6px;">📝 ${entry.desc}</div>` : ''}
         `;
@@ -3099,9 +3259,10 @@
           <span>Total arbetstid: <strong>${Number(grandTotalHours.toFixed(2))} h</strong></span>
           <span>Totalsumma: <strong>${Math.round(grandTotalCost).toLocaleString('sv-SE')} kr</strong></span>
         </div>
-        <div style="display:flex; justify-content:space-between; font-size:13px; margin-top:8px; color:#94a3b8; border-top:1px solid #334155; padding-top:6px;">
+        <div style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:6px; font-size:13px; margin-top:8px; color:#94a3b8; border-top:1px solid #334155; padding-top:6px;">
           <span>Vardags-OB: <strong>${Number(totalObHours.toFixed(2))} h</strong> (${Math.round(totalObCost).toLocaleString('sv-SE')} kr)</span>
           <span>Helg-OB: <strong>${Number(totalWeekendObHours.toFixed(2))} h</strong> (${Math.round(totalWeekendObCost).toLocaleString('sv-SE')} kr)</span>
+          <span>Övertid: <strong>${Number(totalOtHours.toFixed(2))} h</strong> (${Math.round(totalOtCost).toLocaleString('sv-SE')} kr)</span>
         </div>
       `;
       listContainer.appendChild(summaryCard);
@@ -3519,6 +3680,102 @@
       return rows;
     }
 
+    function buildReportRowsWithOvertime(filteredEntries, allEntries, customers) {
+      const groups = new Map();
+
+      allEntries.forEach(entry => {
+        if (!entry || !entry.date || !entry.customerId) return;
+        const ym = entry.date.slice(0, 7);
+        const key = `${entry.customerId}|${ym}`;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(entry);
+      });
+
+      const entryRowsMap = new Map();
+
+      groups.forEach((groupEntries, key) => {
+        const customerId = key.split('|')[0];
+        const customer = customers.find(c => c.id === customerId);
+        const baseRate = customer ? safeNum(customer.hourly_rate) : 0;
+        const otEnabled = !!(customer && customer.ot_enabled);
+        const monthlyCap = otEnabled
+          ? (parseFloat(customer.ot_monthly_cap) === 0 ? 0 : safeNum(customer.ot_monthly_cap, 160))
+          : Infinity;
+
+        const sorted = [...groupEntries].sort((a, b) => {
+          const dA = `${a.date}T${a.startTime || '00:00'}`;
+          const dB = `${b.date}T${b.startTime || '00:00'}`;
+          return dA.localeCompare(dB);
+        });
+
+        let accumulatedHours = 0;
+
+        sorted.forEach(entry => {
+          const parts = splitEntryForReport(entry, customer);
+          const finalRows = [];
+
+          parts.forEach(p => {
+            const segHours = safeNum(p.hours);
+            if (!otEnabled || segHours <= 0) {
+              finalRows.push(p);
+              return;
+            }
+
+            const prevAcc = accumulatedHours;
+            accumulatedHours = Number((accumulatedHours + segHours).toFixed(4));
+
+            if (accumulatedHours <= monthlyCap) {
+              finalRows.push(p);
+            } else {
+              const withinCapHours = Math.max(0, Number((monthlyCap - prevAcc).toFixed(4)));
+              const overCapHours = Number((segHours - withinCapHours).toFixed(4));
+
+              if (withinCapHours > 0) {
+                finalRows.push({
+                  ...p,
+                  normalHours: p.normalHours > 0 ? Number(withinCapHours.toFixed(2)) : 0,
+                  obHours: p.obHours > 0 ? Number(withinCapHours.toFixed(2)) : 0,
+                  hours: Number(withinCapHours.toFixed(2)),
+                  cost: Math.round(withinCapHours * safeNum(p.rate) * 100) / 100
+                });
+              }
+
+              if (overCapHours > 0) {
+                const isQual = isWeekend(p.date || entry.date) || (p.project && p.project.includes('Helg-OB'));
+                const otRate = getOvertimeHourlyRate(baseRate, customer, isQual);
+                const otLabel = isQual ? 'Kval. övertid' : 'Övertid';
+                finalRows.push({
+                  date: p.date,
+                  startTime: p.startTime,
+                  endTime: p.endTime,
+                  breakMin: withinCapHours === 0 ? p.breakMin : 0,
+                  normalHours: 0,
+                  obHours: 0,
+                  otHours: Number(overCapHours.toFixed(2)),
+                  hours: Number(overCapHours.toFixed(2)),
+                  rate: otRate,
+                  cost: Math.round(overCapHours * otRate * 100) / 100,
+                  project: (entry.project ? entry.project + ' ' : '') + `(${otLabel})`,
+                  customerName: p.customerName,
+                  desc: (entry.desc ? entry.desc + ' - ' : '') + `${otLabel} över ${monthlyCap}h/mån`
+                });
+              }
+            }
+          });
+
+          entryRowsMap.set(entry.id, finalRows);
+        });
+      });
+
+      const allSplitRows = [];
+      filteredEntries.forEach(e => {
+        const cust = customers.find(c => c.id === e.customerId);
+        const rows = entryRowsMap.get(e.id) || splitEntryForReport(e, cust);
+        rows.forEach(r => allSplitRows.push(r));
+      });
+      return allSplitRows;
+    }
+
     async function exportExcel() {
       if (typeof XLSX === 'undefined') {
         alert("Excel-biblioteket kunde inte laddas.");
@@ -3531,15 +3788,10 @@
       const client = getClientInfo();
       const clientName = client.name || 'T Nyström Böhm';
 
-      let minDate = filtered[0].date;
-      let maxDate = filtered[filtered.length - 1].date;
+      const minDate = filtered[0].date;
+      const maxDate = filtered[filtered.length - 1].date;
 
-      let allSplitRows = [];
-      filtered.forEach(e => {
-        const cust = customers.find(c => c.id === e.customerId);
-        const splitRows = splitEntryForReport(e, cust);
-        splitRows.forEach(sr => allSplitRows.push(sr));
-      });
+      const allSplitRows = buildReportRowsWithOvertime(filtered, getTimeEntries(), customers);
 
       const hasOb = allSplitRows.some(r => r.obHours > 0);
       const hasOt = allSplitRows.some(r => r.otHours > 0);
@@ -3601,6 +3853,8 @@
       let totalObCostSum = 0;
       let totalWkndHoursSum = 0;
       let totalWkndCostSum = 0;
+      let totalOtHoursSum = 0;
+      let totalOtCostSum = 0;
 
       allSplitRows.forEach(sr => {
         if (sr.obHours > 0) {
@@ -3611,6 +3865,10 @@
             totalObHoursSum += sr.obHours;
             totalObCostSum += sr.cost;
           }
+        }
+        if (sr.otHours > 0) {
+          totalOtHoursSum += sr.otHours;
+          totalOtCostSum += sr.cost;
         }
       });
 
@@ -3623,6 +3881,7 @@
         ["Total arbetstid", `${Number(totalHoursSum.toFixed(2))} h`],
         ["Vardags-OB", `${Number(totalObHoursSum.toFixed(2))} h (${Math.round(totalObCostSum)} kr)`],
         ["Helg-OB", `${Number(totalWkndHoursSum.toFixed(2))} h (${Math.round(totalWkndCostSum)} kr)`],
+        ["Övertid", `${Number(totalOtHoursSum.toFixed(2))} h (${Math.round(totalOtCostSum)} kr)`],
         ["Total ersättning", `${Number(totalCostSum.toFixed(2))} kr`]
       ];
 
@@ -3677,12 +3936,7 @@
       const client = getClientInfo();
       const clientName = client.name || 'T Nyström Böhm';
 
-      let allSplitRows = [];
-      filtered.forEach(e => {
-        const cust = customers.find(c => c.id === e.customerId);
-        const splitRows = splitEntryForReport(e, cust);
-        splitRows.forEach(sr => allSplitRows.push(sr));
-      });
+      const allSplitRows = buildReportRowsWithOvertime(filtered, getTimeEntries(), customers);
 
       const hasOb = allSplitRows.some(r => r.obHours > 0);
       const hasOt = allSplitRows.some(r => r.otHours > 0);
